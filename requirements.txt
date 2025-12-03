@@ -1,0 +1,6 @@
+opencv-python
+numpy
+opencv-contrib-python
+pyttsx3
+pydub
+PyYAML
