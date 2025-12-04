@@ -28,7 +28,7 @@ This project is a complete, professional face recognition security system built 
 
 1.  **Clone the Repository**
     ```bash
-    git clone <your-repository-url>
+    git clone <https://github.com/midrees555/Computer-Vision-Projects>
     cd Face-Recognition
     ```
 
