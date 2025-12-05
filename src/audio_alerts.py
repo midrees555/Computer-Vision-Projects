@@ -1,11 +1,10 @@
 import pyttsx3  # Import the library for text-to-speech conversion.
-from pydub import AudioSegment  # Import AudioSegment for loading audio files.
-from pydub.playback import play  # Import play function to play audio segments.
+import winsound  # Import winsound for playing WAV files natively on Windows (no external dependencies).
 import os  # Import os to check if files exist.
 import threading  # Import threading to play sounds in the background without freezing the main program.
 
 class AudioNotifier:  # Defines the class responsible for all audio notifications.
-    def __init__(self, alert_sound_path='assets/alert.wav'):  # The constructor method.
+    def __init__(self, alert_sound_path=None):  # The constructor method.
         """Initializes the text-to-speech engine, sets a female voice, and loads the alert sound."""
         self.engine = pyttsx3.init()  # Initialize the text-to-speech engine.
 
@@ -21,19 +20,23 @@ class AudioNotifier:  # Defines the class responsible for all audio notification
         except Exception as e:  # If any error occurs during this process...
             print(f"Audio: Could not set female voice: {e}")  # ...print the error.
 
-        self.alert_sound = None  # Initialize the alert sound variable to None.
+        # --- Determine the alert sound path relative to this script's location ---
+        if alert_sound_path is None:  # If no path was provided...
+            script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory where this audio_alerts.py file is located.
+            alert_sound_path = os.path.join(script_dir, 'assets', 'siren-alert.wav')  # Build the path to the alert sound.
+
+        self.alert_sound_path = None  # Initialize the alert sound path variable to None.
         if os.path.exists(alert_sound_path):  # Check if the specified alert sound file exists.
-            try:  # Use a try-except block to handle potential errors with corrupted audio files.
-                # pydub can handle wav, mp3, and other formats automatically.
-                self.alert_sound = AudioSegment.from_file(alert_sound_path)  # Load the audio file into memory.
-            except Exception as e:  # If the file cannot be loaded...
-                print(f"Could not load alert sound '{alert_sound_path}': {e}")  # ...print an error message.
+            self.alert_sound_path = alert_sound_path  # Store the path for later use.
+            print(f"Audio: Alert sound loaded from '{alert_sound_path}'")  # Log success.
         else:  # If the file does not exist...
             print(f"Warning: Alert sound file not found at '{alert_sound_path}'")  # ...print a warning.
 
-    def _play_in_background(self, audio_segment):  # A helper method for playing sound.
-        """Plays a pydub audio segment in a separate thread to avoid blocking the main program."""
-        threading.Thread(target=play, args=(audio_segment,), daemon=True).start()  # Create and start a new thread to play the sound.
+    def _play_wav_in_background(self, wav_path):  # A helper method for playing WAV sound.
+        """Plays a WAV file using winsound in a separate thread to avoid blocking the main program."""
+        def play_sound():
+            winsound.PlaySound(wav_path, winsound.SND_FILENAME)  # Play the WAV file.
+        threading.Thread(target=play_sound, daemon=True).start()  # Create and start a new thread to play the sound.
 
     def welcome(self, name):  # Method to welcome a known person.
         """Speaks a welcome message for a known person in a non-blocking background thread."""
@@ -50,9 +53,9 @@ class AudioNotifier:  # Defines the class responsible for all audio notification
 
     def unknown_alert(self):  # Method to alert for an unknown person.
         """Plays the alert sound, or uses text-to-speech as a fallback."""
-        if self.alert_sound:  # If a custom alert sound was successfully loaded...
+        if self.alert_sound_path:  # If a custom alert sound was successfully loaded...
             print("AUDIO: Playing unknown person alert sound.")  # ...log the action.
-            self._play_in_background(self.alert_sound)  # ...play it in the background.
+            self._play_wav_in_background(self.alert_sound_path)  # ...play it in the background.
         else:  # If no custom sound is available...
             # ...fallback to using text-to-speech.
             print("AUDIO: Playing fallback text-to-speech alert.")  # Log the fallback action.

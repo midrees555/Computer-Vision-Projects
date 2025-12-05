@@ -9,6 +9,7 @@ import time  # Import time for calculating FPS and handling time-based events.
 from notifications import send_alert_email  # Import our custom function for sending email alerts.
 from logger import SecurityLogger  # Import our custom class for logging events to a CSV file.
 from audio_alerts import AudioNotifier  # Import our custom class for playing audio alerts.
+from reinforcement_learning import ReinforcementTracker  # Import RL tracker for adaptive learning.
 
 def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0, confidence_threshold=0.8):  # Main function for live recognition.
     """Captures video, detects faces, tracks them, and performs recognition with alerts and logging."""
@@ -76,6 +77,17 @@ def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0
     # --- Initialize Modules ---
     logger = SecurityLogger()  # Create an instance of our logger class.
     audio_notifier = AudioNotifier()  # Create an instance of our audio notifier class.
+    
+    # --- Initialize Reinforcement Learning Tracker ---
+    rl_tracker = ReinforcementTracker(
+        learning_rate=0.02,
+        threshold_bounds=(0.65, 0.92),
+        initial_threshold=confidence_threshold
+    )
+    rl_tracker.load()  # Load previous learning state if available
+    print(f"✓ RL Tracker initialized | Adaptive threshold: {rl_tracker.threshold:.3f}")
+    print("  Feedback controls: 'y' = Correct | 'n' = Wrong | 's' = Statistics | 'r' = Reset feedback")
+    
     # This list will store features of unknown faces for which we've recently sent an alert.
     # It acts as a short-term memory to prevent spamming alerts for the same person.
     recent_unknowns = []  # Initialize an empty list.
@@ -89,11 +101,16 @@ def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0
     print("Camera opened successfully. Press 'q' in the video window to quit.")  # Inform the user.
 
     last_frame_time = time.time()  # Initialize a variable to store the time of the last frame for FPS calculation.
+    frame_count = 0  # Frame counter for unique identification
+    last_prediction = None  # Store last prediction for feedback
+    
     while True:  # Start the main loop to process video frames.
         ret, frame = cap.read()  # Read a single frame from the camera.
         if not ret:  # If the frame was not captured successfully (e.g., camera disconnected)...
             print("Error: Failed to capture frame.")  # ...print an error...
             break  # ...and exit the loop.
+        
+        frame_count += 1  # Increment frame counter
 
         # --- FPS Calculation ---
         current_time = time.time()  # Get the current time.
@@ -151,18 +168,39 @@ def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0
             aligned_face = face_recognizer.alignCrop(detection_frame, face)  # Align and crop the detected face.
             feature = face_recognizer.feature(aligned_face)  # Extract the 128-d feature vector (embedding).
             
+            # --- Use Adaptive Threshold from RL Tracker ---
             # Compare the current face's feature against all known embeddings.
             best_score = -1  # Initialize the best score.
             current_name = "Unknown"  # Initialize the current prediction.
+            best_match_index = -1  # Track which embedding matched best
+            
             for i, emb in enumerate(known_embeddings):  # Loop through all known embeddings.
                 score = face_recognizer.match(feature, emb, cv2.FaceRecognizerSF_FR_COSINE)  # Calculate the cosine similarity score.
                 if score > best_score:  # If this score is the best so far...
                     best_score = score  # ...update the best score...
-                    current_name = known_names[i]  # ...and store the corresponding name.
+                    current_name = known_names[i]  # ...store the corresponding name.
+                    best_match_index = i  # ...store the index.
+            
+            # --- Apply Adaptive Threshold ---
+            # Get person-specific or global adaptive threshold
+            adaptive_threshold = rl_tracker.get_threshold(current_name)
             
             # Add the current prediction to this tracker's history for smoothing.
-            if best_score > confidence_threshold:  # If the score is above our confidence threshold...
+            if best_score > adaptive_threshold:  # Use adaptive threshold instead of fixed
                 tracker['predictions'].append(current_name)  # ...add the recognized name to the history.
+                
+                # Log prediction for potential feedback
+                rl_tracker.log_prediction(
+                    embedding=feature,
+                    predicted_name=current_name,
+                    similarity=best_score,
+                    frame_id=frame_count
+                )
+                last_prediction = {
+                    'frame_id': frame_count,
+                    'name': current_name,
+                    'similarity': best_score
+                }
             else:  # Otherwise...
                 tracker['predictions'].append("Unknown")  # ...add "Unknown" to the history.
 
@@ -226,6 +264,12 @@ def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0
             orig_h_box = int((current_box[3] - current_box[1]) / scale)  # Scale the height.
             color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)  # Green for known, red for unknown.
             text = f"{name} ({best_score:.2f})"  # Create the text to display (Name and Score).
+            
+            # Display adaptive threshold being used
+            threshold_text = f"T:{adaptive_threshold:.2f}"
+            cv2.putText(frame, threshold_text, (orig_x, orig_y + orig_h_box + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+            
             cv2.putText(frame, f"FPS: {fps:.1f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)  # Draw the FPS counter.
             cv2.rectangle(frame, (orig_x, orig_y), (orig_x + orig_w_box, orig_y + orig_h_box), color, 2)  # Draw the bounding box.
             cv2.putText(frame, text, (orig_x, orig_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # Draw the name text above the box.
@@ -241,13 +285,79 @@ def recognize_faces_live(embeddings_path='models/embeddings.pkl', camera_index=0
         for tracker_id in dead_trackers:  # Loop through the trackers marked for deletion.
             del tracked_faces[tracker_id]  # Remove them from the active trackers dictionary.
 
+        # --- Display RL Statistics on Frame ---
+        stats = rl_tracker.get_statistics()
+        stats_text = f"Adaptive T: {stats['global_threshold']:.3f} | Acc: {stats['overall_accuracy']:.1%} | Feedback: {stats['total_feedback']}"
+        cv2.putText(frame, stats_text, (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        
         cv2.imshow('Live Face Recognition (Press q to quit)', frame)  # Display the final frame in a window.
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):  # Wait for 1ms for a key press; if it's 'q'...
+        # --- Keyboard Controls for RL Feedback ---
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('q'):  # Wait for 1ms for a key press; if it's 'q'...
             print("'q' pressed. Exiting...")  # ...log the exit...
             break  # ...and break the main loop.
+        
+        elif key == ord('y'):  # 'y' = Correct prediction
+            if last_prediction:
+                result = rl_tracker.provide_feedback(
+                    last_prediction['frame_id'],
+                    is_correct=True
+                )
+                if result['success']:
+                    print(f"✓ Feedback: {result['message']}")
+                last_prediction = None
+            else:
+                print("⚠ No recent prediction to provide feedback on")
+        
+        elif key == ord('n'):  # 'n' = Wrong prediction
+            if last_prediction:
+                print(f"Wrong prediction. Predicted: {last_prediction['name']}")
+                print("Enter the correct name (or press Enter to skip): ", end='')
+                # Note: For command-line input during video, this will pause the video
+                # In GUI version, we'll handle this better
+                result = rl_tracker.provide_feedback(
+                    last_prediction['frame_id'],
+                    is_correct=False,
+                    true_name=last_prediction['name']  # Will be enhanced in GUI
+                )
+                if result['success']:
+                    print(f"✗ Feedback: {result['message']}")
+                last_prediction = None
+            else:
+                print("⚠ No recent prediction to provide feedback on")
+        
+        elif key == ord('s'):  # 's' = Show statistics
+            stats = rl_tracker.get_statistics()
+            print("\n" + "="*60)
+            print("📊 REINFORCEMENT LEARNING STATISTICS")
+            print("="*60)
+            print(f"Global Threshold: {stats['global_threshold']:.3f} (range: {stats['threshold_bounds']})")
+            print(f"Overall Accuracy: {stats['overall_accuracy']:.1%} ({stats['total_feedback']} feedback)")
+            print(f"Recent Accuracy: {stats['recent_accuracy']:.1%} (last 20)")
+            print(f"Session Duration: {stats['session_duration_minutes']:.1f} minutes")
+            print(f"\nConfidence Calibration:")
+            print(f"  Avg Similarity (Correct): {stats['confidence_calibration']['avg_similarity_correct']:.3f}")
+            print(f"  Avg Similarity (Incorrect): {stats['confidence_calibration']['avg_similarity_incorrect']:.3f}")
+            print(f"  Separation: {stats['confidence_calibration']['separation']:.3f}")
+            
+            if stats['person_stats']:
+                print(f"\nTop {len(stats['person_stats'])} People:")
+                for p in stats['person_stats']:
+                    threshold_info = f" | Custom T: {p['custom_threshold']:.2f}" if p['custom_threshold'] else ""
+                    print(f"  • {p['name']}: {p['accuracy']:.1%} ({p['correct']}/{p['total']}){threshold_info}")
+            print("="*60 + "\n")
+        
+        elif key == ord('r'):  # 'r' = Reset RL (with confirmation)
+            print("⚠ Are you sure you want to reset all RL learning? This cannot be undone!")
+            print("Type 'RESET' and press Enter to confirm, or anything else to cancel: ", end='')
+            # This will pause video - better handled in GUI version
 
     # --- Final Cleanup ---
+    rl_tracker.save()  # Save RL learning state before exit
+    rl_tracker.export_statistics_json()  # Export statistics for analysis
+    
     cap.release()  # Release the camera resource.
     cv2.destroyAllWindows()  # Close all OpenCV windows.
     print("Camera released and windows closed.")  # Print a final message.
